@@ -1,0 +1,196 @@
+---
+title: "Samur_GSE164551"
+author: "Peipei Li"
+date: ""
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## load library
+
+```{r}
+library("workflowr")
+library("dplyr")
+library("Seurat")
+library("patchwork")
+library("ggplot2")
+library("RColorBrewer")
+library("dittoSeq")
+library("tidyverse")
+library("SingleR")
+library("celldex")
+library("scRNAseq")
+library("scuttle")
+```
+
+## SC-RNAseq analysis
+
+```{r}
+# Load the Baseline dataset
+Samur.data <- Read10X(data.dir = "data/GSE164551")
+# Initialize the Seurat object with the raw (non-normalized data).
+Samur <- CreateSeuratObject(counts = Samur.data, project = "Baseline", min.cells = 3, min.features = 200)
+Samur
+
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+Samur[["percent.mt"]] <- PercentageFeatureSet(Samur, pattern = "^MT-")
+
+#Samur.list <- SplitObject(Samur, split.by = "orig.ident")
+
+
+
+# Visualize QC metrics as a violin plot
+VlnPlot(Samur, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(Samur, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(Samur, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+Samur <- subset(Samur, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mt < 25)
+
+table(Samur$orig.ident)
+
+
+
+Samur <- SCTransform(Samur, vars.to.regress = c("percent.mt", "nFeature_RNA"), variable.features.n = 3000)
+
+Samur <- RunPCA(Samur, verbose = FALSE)
+Samur <- RunUMAP(Samur, reduction = "pca", dims = 1:30)
+Samur <- FindNeighbors(Samur, reduction = "pca", dims = 1:30)
+Samur <- FindClusters(Samur, resolution = 0.3)
+
+
+
+
+p1 <- DimPlot(Samur, reduction = "umap", label = TRUE) + NoLegend()
+p2 <- DimPlot(Samur, reduction = "umap", group.by = "orig.ident")
+p1 + p2
+#p1
+ggsave("output/Samur_GSE164551_orgCluster.png", width = 15, height = 5)
+
+
+## Auto annotation
+hpca.se <- HumanPrimaryCellAtlasData()
+
+sceSamur <- SingleCellExperiment(assay=list(logcounts=log2(Samur[['SCT']]@counts+1)), colData = Samur@meta.data)
+#sceSamur <- logNormCounts(sceSamur)
+
+pred.hesc <- SingleR(test = sceSamur, ref = hpca.se, assay.type.test=1, labels = hpca.se$label.main)
+Samur$SingleR_hpca_pruned.lables <- pred.hesc[rownames(Samur@meta.data), ]$pruned.labels
+DimPlot(Samur, group.by = c("SingleR_hpca_pruned.lables"), label = T) 
+ggsave("output/Samur_GSE164551_predCluster.png", width = 12, height = 5)
+
+
+
+## find markers
+# Samur.markers <- FindAllMarkers(Samur, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+# Samur.markers %>%
+#     group_by(cluster) %>%
+#     slice_max(n = 2, order_by = avg_log2FC)
+
+
+## Plot marker genes for annotation
+DotPlot(Samur, features = c("CD3D", "CD3E", "CD3G", "CD4", "CD8A", "CD5", "NCAM1", "CCL5", "KLRC1", "KLRD1", "KLRC2", "CD79A", "CD79B", "CCND1", "SLAMF7", "XBP1", "POU2AF1", "Gene1", "IRF4", "CD14", "FCGR3A", "CD68", "PECAM1", "HBB")) + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "YlOrRd"))
+ggsave("output/Samur_GSE164551_markers1.png", width = 22, height = 5)
+DotPlot(Samur, features = c("JCHAIN", "IGHG1", "Gene4", "HLA-DRA", "CD79B", "LILRA4", "CD3D", "NKG7", "FCGR3B", "CD68", "CD14", "FCGR3A", "ALAS2")) + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "YlOrRd"))
+ggsave("output/Samur_GSE164551_markers2.png", width = 12, height = 5)
+
+
+
+## new clusters with annotation
+new.cluster.ids <- c("NK", "T", "T", "Monocyte", "B", "Monocyte", "NK", "NK", "MM", "Erythrocyte", "Erythrocyte", "Monocyte", "Erythrocyte", "T", "Monocyte", "Myolocyte")
+names(new.cluster.ids) <- levels(Samur)
+Samur <- RenameIdents(Samur, new.cluster.ids)
+DimPlot(Samur, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+ggsave("output/Samur_GSE164551_cluster.png", width = 8, height = 5)
+DimPlot(Samur, reduction = "umap", label = TRUE, pt.size = 0.5, split.by = "orig.ident") + NoLegend()
+ggsave("output/Samur_GSE164551_cluster_byG.png", width = 25, height = 5)
+
+
+
+
+
+
+
+
+
+
+DefaultAssay(Samur) <- "RNA"
+Samur$cond_celltype <- paste( Samur$orig.ident, Idents(Samur), sep = "_")
+Samur$celltype <- Idents(Samur)
+
+
+## overall deg
+
+## overall violin plot
+plots <- multi_dittoPlot(Samur, c("Gene1", "Gene2", "Gene3", "Gene4", "Gene5"), group.by = "orig.ident", vlnplot.lineweight = 0.2, jitter.size = 0.3) 
+wrap_plots(plots = plots, ncol= 1, nrow=1)
+ggsave("output/Samur_GSE164551_overallGeneVln_RNA.png", width = 8, height = 6)
+
+
+## overall box plot
+dt_all <- data.frame(group=Samur$orig.ident, cellType=Samur$celltype, Gene1=Samur[['RNA']]@data['Gene1', ], Gene2=Samur[['RNA']]@data['Gene2', ], Gene3=Samur[['RNA']]@data['Gene3', ], Gene4=Samur[['RNA']]@data['Gene4', ], Gene5=Samur[['RNA']]@data['Gene5', ])
+
+
+# library(RColorBrewer)
+# f <- function(pal) brewer.pal(brewer.pal.info[pal, "maxcolors"], pal)
+# (cols <- f("Set2"))
+
+dt_all <- dt_all %>%
+  gather("Gene", "Count", 3:7)
+geneList <- unique(dt_all$Gene)
+for(i in 1 : length(geneList))
+{
+  p <- ggplot(dt_all %>% filter(Gene %in% geneList[i]), aes(x=group, y=log2(Count), fill=group)) +
+    geom_boxplot(alpha=1, outlier.size=0.1, lwd=0.5, fatten = 0.5) +
+    stat_summary(fun.y=mean, geom="point", shape=20, size=0.1, color="red", fill="red") +
+    #scale_fill_brewer(palette="Set1") +
+    scale_fill_manual(values=c(S1="#66C2A5", S2="#FC8D62", S3="#8DA0CB", S4="#E78AC3", S5="#A6D854", S6="#FFD92F", S7="#E5C494", S8="#B3B3B3"))+
+    theme_classic() +
+    theme(legend.position="right") +
+    ylab("Log2(Raw count)") + xlab("") +
+    ggtitle(as.character(geneList[i]))
+  p
+  ggsave(paste("output/Samur_GSE164551_overallGeneBox_log2RNA_", as.character(geneList[i]), ".png", sep = ""), width = 4,  height = 3)
+}
+
+
+Idents(Samur) <- "orig.ident"
+deg <- FindMarkers(Samur, ident.1 = "S1", ident.2 = "S6", logfc.threshold = 0, min.pct = 0, verbose = FALSE)
+deg[c("Gene1", "Gene2", "Gene3", "Gene4", "Gene5"), ]
+
+
+
+## DE analysis in different conditions in same cell type
+
+## box plot for each gene
+
+for(i in 1 : length(geneList))
+{
+  p <- ggplot(dt_all %>% filter(Gene %in% geneList[i]), aes(x=cellType, y=log2(Count), fill=group)) +
+    geom_boxplot(alpha=1, outlier.size=0.1, lwd=0.5, fatten = 0.5) +
+    #stat_summary(fun.y=mean, geom="point", shape=20, size=0.1, color="red", fill="red") +
+    scale_fill_manual(values=c(S1="#66C2A5", S2="#FC8D62", S3="#8DA0CB", S4="#E78AC3", S5="#A6D854", S6="#FFD92F", S7="#E5C494", S8="#B3B3B3"))+
+    theme_classic() +
+    theme(legend.position="right") +
+    ylab("Log2(Raw count)") + xlab("") +
+    ggtitle(as.character(geneList[i]))
+  p
+  ggsave(paste("output/Samur_GSE164551_GeneBox_log2RNA_", as.character(geneList[i]), ".png", sep = ""), width = 7,  height = 3)
+}
+
+
+plots <- VlnPlot(Samur, features = c("Gene1", "Gene2", "Gene3", "Gene4", "Gene5"), split.by = "orig.ident", group.by = "celltype", pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+ggsave("output/Samur_GSE164551_geneVln.png", width = 6, height = 15)
+
+
+Idents(Samur) <- "cond_celltype"
+deg_mm <- FindMarkers(Samur, ident.1 = "S1_MM", ident.2 = "S6_MM", logfc.threshold = 0, min.pct = 0, verbose = FALSE)
+deg_mm[c("Gene1", "Gene2", "Gene3", "Gene4", "Gene5"), ]
+
+```
+
